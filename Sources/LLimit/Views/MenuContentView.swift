@@ -238,12 +238,12 @@ private struct MiniWindow: View {
         .frame(minWidth: 64, idealWidth: 90)
     }
 
-    /// Compact, fixed-width-ish labels so 4 windows fit on one row even on
-    /// the summary view. `7d opus` is a model-specific weekly cap — drop the
-    /// redundant `7D` prefix.
+    /// Model-specific limits already imply a weekly window, so drop the
+    /// redundant `7D` prefix in the compact summary.
     private var shortLabel: String {
-        let l = window.label.lowercased()
-        if l.contains("opus") { return "OPUS" }
+        if window.label.lowercased().hasPrefix("7d ") {
+            return String(window.label.dropFirst(3)).uppercased()
+        }
         return window.label.uppercased()
     }
 }
@@ -353,28 +353,36 @@ private struct WindowRow: View {
     let accent: Color
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(windowTitle)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(rightText)
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(barColor)
-            }
-            UsageBar(progress: progress, color: barColor)
-                .frame(height: 6)
-            HStack {
-                if let resets = window.resetsAt, resets > Date() {
-                    Image(systemName: "clock")
-                        .font(.system(size: 9))
-                    Text("resets in \(formatRelative(resets))")
-                        .font(.caption2)
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            HStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(windowTitle)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(rightText)
+                            .font(.caption.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(barColor)
+                    }
+                    UsageBar(progress: progress, color: barColor)
+                        .frame(height: 6)
+                    HStack {
+                        if let resets = window.resetsAt, resets > context.date {
+                            Image(systemName: "clock")
+                                .font(.system(size: 9))
+                            Text("resets in \(formatRelative(resets))")
+                                .font(.caption2)
+                        }
+                        Spacer()
+                    }
+                    .foregroundStyle(.tertiary)
                 }
-                Spacer()
+
+                if let resetProgress = resetProgress(at: context.date) {
+                    ResetProgressRing(progress: resetProgress)
+                }
             }
-            .foregroundStyle(.tertiary)
         }
     }
 
@@ -382,7 +390,11 @@ private struct WindowRow: View {
         switch window.label {
         case "5h": return "5-hour window"
         case "7d": return "Weekly window"
-        default: return window.label + " window"
+        default:
+            if window.label.lowercased().hasPrefix("7d ") {
+                return "\(window.label.dropFirst(3)) weekly limit"
+            }
+            return window.label + " window"
         }
     }
 
@@ -412,12 +424,47 @@ private struct WindowRow: View {
         return accent
     }
 
+    private func resetProgress(at now: Date) -> Double? {
+        guard let resetsAt = window.resetsAt else { return nil }
+        let label = window.label.lowercased()
+        let duration: TimeInterval
+        if label.contains("5h") {
+            duration = 5 * 60 * 60
+        } else if label.contains("7d") {
+            duration = 7 * 24 * 60 * 60
+        } else {
+            return nil
+        }
+        return max(0, min(1, 1 - resetsAt.timeIntervalSince(now) / duration))
+    }
+
     private func softCap(label: String) -> Double {
         switch label {
         case "5h": return 2_000_000
         case "7d": return 25_000_000
         default: return 1_000_000
         }
+    }
+}
+
+private struct ResetProgressRing: View {
+    let progress: Double
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.secondary.opacity(0.18), lineWidth: 5)
+            Circle()
+                .trim(from: 0, to: progress)
+                .stroke(
+                    Color.secondary.opacity(0.75),
+                    style: StrokeStyle(lineWidth: 5, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+        }
+        .frame(width: 30, height: 30)
+        .accessibilityLabel("Reset cycle progress")
+        .accessibilityValue("\(Int((progress * 100).rounded())) percent")
     }
 }
 

@@ -20,10 +20,9 @@ enum UsageAPIError: LocalizedError {
 // MARK: - Claude
 
 /// Calls Claude Code's `/api/oauth/usage` for plan-relative percentages.
-/// Response shape (from the CLI binary's statusline doc):
-///   { five_hour: { used_percentage, resets_at },
-///     seven_day: { used_percentage, resets_at },
-///     seven_day_opus: { ... } }
+/// The response includes the legacy top-level windows plus a forward-compatible
+/// `limits` array. Model-specific weekly caps such as Fable are exposed as
+/// `weekly_scoped` entries in that array.
 struct AnthropicUsageAPI: UsageAPI {
     func fetch(account: Account) async throws -> UsageSnapshot {
         // Try to load LLimit's own per-account credential first.
@@ -98,27 +97,7 @@ struct AnthropicUsageAPI: UsageAPI {
         }
 
         if let limits = limitsResult {
-            if let fh = limits.fiveHour {
-                windows.append(UsageWindow(
-                    label: "5h",
-                    usedPercent: fh.usedPercentage / 100.0,
-                    resetsAt: fh.resetsAtDate
-                ))
-            }
-            if let sd = limits.sevenDay {
-                windows.append(UsageWindow(
-                    label: "7d",
-                    usedPercent: sd.usedPercentage / 100.0,
-                    resetsAt: sd.resetsAtDate
-                ))
-            }
-            if let op = limits.sevenDayOpus {
-                windows.append(UsageWindow(
-                    label: "7d opus",
-                    usedPercent: op.usedPercentage / 100.0,
-                    resetsAt: op.resetsAtDate
-                ))
-            }
+            windows = Self.usageWindows(from: limits)
         }
 
         return UsageSnapshot(
@@ -131,7 +110,7 @@ struct AnthropicUsageAPI: UsageAPI {
         )
     }
 
-    fileprivate struct RateLimit: Codable {
+    struct RateLimit: Codable {
         let utilization: Double
         let resetsAt: String?
         var usedPercentage: Double { utilization }
@@ -149,18 +128,142 @@ struct AnthropicUsageAPI: UsageAPI {
         }
     }
 
-    fileprivate struct RateLimits: Codable {
+    struct PlanLimit: Codable {
+        let kind: String?
+        let percent: Double?
+        let utilization: Double?
+        let resetsAt: String?
+        let isActive: Bool?
+        let scope: LimitScope?
+
+        var usedPercentage: Double? { percent ?? utilization }
+        var resetsAtDate: Date? {
+            guard let resetsAt else { return nil }
+            return RateLimit(utilization: 0, resetsAt: resetsAt).resetsAtDate
+        }
+        var modelDisplayName: String? {
+            scope?.model?.displayName?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case kind
+            case percent
+            case utilization
+            case resetsAt = "resets_at"
+            case isActive = "is_active"
+            case scope
+        }
+    }
+
+    struct LimitScope: Codable {
+        let model: LimitModel?
+    }
+
+    struct LimitModel: Codable {
+        let displayName: String?
+
+        enum CodingKeys: String, CodingKey {
+            case displayName = "display_name"
+        }
+    }
+
+    struct RateLimits: Codable {
         let fiveHour: RateLimit?
         let sevenDay: RateLimit?
         let sevenDayOpus: RateLimit?
         let sevenDaySonnet: RateLimit?
+        let limits: [PlanLimit]?
 
         enum CodingKeys: String, CodingKey {
             case fiveHour = "five_hour"
             case sevenDay = "seven_day"
             case sevenDayOpus = "seven_day_opus"
             case sevenDaySonnet = "seven_day_sonnet"
+            case limits
         }
+    }
+
+    static func usageWindows(from limits: RateLimits) -> [UsageWindow] {
+        var windows: [UsageWindow] = []
+
+        func append(label: String, usedPercentage: Double, resetsAt: Date?) {
+            windows.append(UsageWindow(
+                label: label,
+                usedPercent: usedPercentage / 100.0,
+                resetsAt: resetsAt
+            ))
+        }
+
+        if let fiveHour = limits.fiveHour {
+            append(
+                label: "5h",
+                usedPercentage: fiveHour.usedPercentage,
+                resetsAt: fiveHour.resetsAtDate
+            )
+        }
+        if let sevenDay = limits.sevenDay {
+            append(
+                label: "7d",
+                usedPercentage: sevenDay.usedPercentage,
+                resetsAt: sevenDay.resetsAtDate
+            )
+        }
+
+        // Prefer active entries when Anthropic returns more than one scoped
+        // cap for the same model family. Preserve every distinct model scope
+        // so future model-specific caps work without another app update.
+        let scopedLimits = (limits.limits ?? [])
+            .enumerated()
+            .filter { $0.element.kind == "weekly_scoped" }
+            .sorted { lhs, rhs in
+                let lhsActive = lhs.element.isActive == true
+                let rhsActive = rhs.element.isActive == true
+                if lhsActive != rhsActive { return lhsActive }
+                return lhs.offset < rhs.offset
+            }
+
+        var seenModels: Set<String> = []
+        for (_, scoped) in scopedLimits {
+            guard let modelName = scoped.modelDisplayName,
+                  let usedPercentage = scoped.usedPercentage else {
+                continue
+            }
+            let key = modelFamilyKey(modelName)
+            guard seenModels.insert(key).inserted else { continue }
+            append(
+                label: "7d \(modelName)",
+                usedPercentage: usedPercentage,
+                resetsAt: scoped.resetsAtDate
+            )
+        }
+
+        // Older endpoint variants expose fixed Opus/Sonnet fields instead of
+        // (or alongside) `limits`. Keep them as fallbacks without duplicating
+        // a richer scoped entry for the same model family.
+        func appendLegacy(_ limit: RateLimit?, modelName: String) {
+            guard let limit else { return }
+            let key = modelFamilyKey(modelName)
+            guard seenModels.insert(key).inserted else { return }
+            append(
+                label: "7d \(modelName)",
+                usedPercentage: limit.usedPercentage,
+                resetsAt: limit.resetsAtDate
+            )
+        }
+        appendLegacy(limits.sevenDayOpus, modelName: "Opus")
+        appendLegacy(limits.sevenDaySonnet, modelName: "Sonnet")
+
+        return windows
+    }
+
+    private static func modelFamilyKey(_ displayName: String) -> String {
+        let normalized = displayName.lowercased()
+        for family in ["fable", "opus", "sonnet"] where normalized.contains(family) {
+            return family
+        }
+        return normalized
     }
 
     /// Anthropic rate-limits `/api/oauth/usage` aggressively (429 within
@@ -302,6 +405,12 @@ struct AnthropicUsageAPI: UsageAPI {
         return nil
     }
 
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
 }
 
 /// Anthropic 429s `/api/oauth/usage` when two requests land back-to-back from

@@ -11,6 +11,11 @@ let package = Package(
         .executableTarget(
             name: "LLimit",
             path: "Sources/LLimit"
+        ),
+        .testTarget(
+            name: "LLimitTests",
+            dependencies: ["LLimit"],
+            path: "Tests/LLimitTests"
         )
     ]
 )

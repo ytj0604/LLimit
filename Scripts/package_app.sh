@@ -113,6 +113,7 @@ cat > "$ENTITLEMENTS" <<'PLIST'
 PLIST
 
 echo "==> ad-hoc codesigning (hardened runtime + entitlements)"
+xattr -cr "$APP_DIR"
 codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign - "$APP_DIR"
 codesign --verify --verbose=2 "$APP_DIR" || true
 
@@ -126,4 +127,6 @@ fi
 echo
 echo "done."
 echo "  app: $APP_DIR"
-[ "$EMIT_ZIP" = "zip" ] && echo "  zip: $OUT_DIR/LLimit-${VERSION}.zip"
+if [ "$EMIT_ZIP" = "zip" ]; then
+  echo "  zip: $OUT_DIR/LLimit-${VERSION}.zip"
+fi

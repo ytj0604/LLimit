@@ -61,7 +61,8 @@ Scripts/package_app.sh 0.2.0 zip        # → build/release/LLimit-0.2.0.zip
   2-column grid above that. Supports any mix of Claude and Codex configs.
 - **Real plan-relative percentages**
   - Claude: calls `https://api.anthropic.com/api/oauth/usage` with your
-    existing OAuth token (`5h`, `7d`, `7d opus`, `7d sonnet`).
+    existing OAuth token (`5h`, `7d`, and model-scoped weekly limits such as
+    Fable, Opus, or Sonnet).
   - Codex: parses `~/.codex/sessions/**/*.jsonl` `token_count` events for the
     primary (5h) and secondary (weekly) rate-limit blocks.
 - **Identity at a glance** — surfaces email + plan tier (`max plan`,
